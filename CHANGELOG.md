@@ -9,6 +9,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- New `request_review` command — posts the loaded update's test report to a
+  configured Slack channel (`[slack]` config section), then watches the request
+  thread and auto-approves the update once a reviewer reacts with 👍, relaying
+  any thread replies as they arrive. In turn, `approve` and `reject` now require
+  a recorded Slack review that still shows a 👍, refusing otherwise; a REPL-only
+  `--force` bypasses the gate and is deliberately not exposed over `mtui-mcp`.
 - `mtui-mcp` is now much more token-efficient. Tool schemas are automatically
   slimmed of redundant pydantic boilerplate (the per-field `title` keys and the
   `anyOf: [T, null]` optional-field unions), shrinking the tool-list payload

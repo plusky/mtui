@@ -278,3 +278,53 @@ def test_cancel_one_template_job_leaves_others(tmp_path: Path) -> None:
     assert sess.job_status(first)["state"] == "cancelled"
     assert sess.job_status(second)["state"] == "done"
     assert sess.job_result(second).strip() == ""
+
+
+def test_job_cancel_sets_cooperative_cancel_event(tmp_path: Path) -> None:
+    """``job_cancel`` flags the contextvar cancel event so a polling body exits.
+
+    ``request_review``'s Slack watch passes this event into ``wait_for_ack``;
+    without it a cancelled job's worker thread would keep watching (and could
+    still auto-approve) until its own multi-hour timeout.
+    """
+    import threading
+
+    from mtui.support.cancellation import current_cancel_event
+
+    sess = _make_session(tmp_path)
+
+    entered = threading.Event()
+    finished = threading.Event()
+    observed: dict[str, bool] = {}
+
+    class _CancelProbe(Command):
+        command = "cancel_probe_tmp"
+
+        @classmethod
+        def _add_arguments(cls, parser) -> None:
+            pass
+
+        def __call__(self) -> None:
+            ev = current_cancel_event.get()
+            entered.set()
+            # Block like a review watch would, until job_cancel sets the event
+            # (bounded so a broken implementation fails the test, not hangs it).
+            observed["event_set"] = ev is not None and ev.wait(timeout=5)
+            finished.set()
+
+    async def driver() -> str:
+        job_id = await sess.start_job(_CancelProbe, [])
+        while not entered.is_set():
+            await asyncio.sleep(0.01)
+        await sess.job_cancel(job_id)
+        return job_id
+
+    try:
+        job_id = asyncio.run(driver())
+    finally:
+        Command.registry.pop(_CancelProbe.command, None)
+
+    # The worker thread observed the cancellation promptly (not a timeout).
+    assert finished.wait(timeout=5)
+    assert observed["event_set"] is True
+    assert sess.job_status(job_id)["state"] == "cancelled"
