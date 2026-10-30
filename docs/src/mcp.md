@@ -74,7 +74,8 @@ tools_deny = ["updates", "openqa_overview"]
 tool surface; they do not gate callers. HTTP session isolation is likewise not
 caller authentication. Keep the HTTP transport on its default loopback interface,
 or place it behind an authenticated boundary you trust to operate the remaining
-maintenance tools.
+maintenance tools. The audit trail such a deployment leaves is local-only
+unless shipped: see [Shipping the audit log](#shipping-the-audit-log).
 
 ### Permanent deny-list
 
@@ -682,6 +683,71 @@ still runs and still answers. The file sink stays the durable truth, so
 OTLP-only mode never refuses anything. Tracing diagnostics ride a separate
 best-effort queue (drop + counter; exporter/HTTP-stack targets excluded). The
 endpoint value never appears in logs, records, or errors.
+
+### Shipping the audit log
+
+The file sink above is the durable truth, but it is local and — as noted —
+not tamper-evident. To get records off-host, into a SIEM, a log store, or any
+OpenTelemetry backend, tail the JSONL file with a collector's filelog
+receiver. A minimal OpenTelemetry Collector Contrib setup lives in
+`dist/otel-collector.yaml.example` (tested with otelcol-contrib 0.164.0):
+
+- **Receiver: filelog over `[mcp] audit_log`.** `include` the audit path
+  (plus `<path>.1`…`<path>.5` if the rotated generations should ship too),
+  `start_at: end` so a first start tails only new lines instead of
+  re-shipping history, `storage: file_storage` so a restart resumes from
+  its checkpoint (no re-ship, no gap), and a `json_parser` operator so
+  each JSON line lands as attributes — queryable
+  `tool`, `event`, `outcome`, `seq`, `transport`, `session`, `args`, …
+  (the record's own field names; the full line stays in the body too) — not
+  one opaque message blob. Which fields exist depends on the event: `intent`
+  has no `outcome`; `terminal` has no `args` and carries `job_id`/`job_state`
+  instead.
+- **Rotation stays mtui's job.** The sink rotates by size-cap shift (`<path>`
+  → `<path>.1`, `.1`…`.4` down one, what was `.5` discarded) under an
+  advisory lock the collector never takes part in; the receiver tracks each
+  file by fingerprint across the rename. Never point a `copytruncate`-style
+  rotation at the sink — mtui only ever appends and renames, and an
+  operator-side truncate would lose or duplicate lines. Archiving beyond `.5`
+  is yours to arrange (ship-then-delete, or move aside before the next shift
+  discards it).
+- **Permissions: same-user sidecar.** The sink is `0600` owned by the
+  serving user — created that way and re-tightened on every open, so a looser
+  mode never survives the next write and no supplementary-group arrangement
+  sticks. Run the collector as that same user, typically a same-user sidecar.
+  Never `o+r`, never `0644`: the record names consequential actions, and
+  group/other write must stay off regardless, since the sink vetting refuses
+  anything not owned by the serving user and a writable-by-others directory
+  already voids the symlink/FIFO guarantee above.
+- **Sensitivity: the file names consequential things.** Every `call` and
+  `dispatch` record carries the tool name, the outcome, the RRIDs and
+  best-effort host names the call resolved to, and the redacted arguments
+  (secrets masked, file bodies fingerprinted as `{bytes, sha256}` — see
+  above). An `intent` record carries the same header and arguments but no
+  outcome; a `terminal` record carries no arguments at all, only the job id,
+  its terminal state, and the outcome. Anyone who can read the
+  shipped stream learns which hosts were acted on and how the calls ended.
+  The example's `debug` exporter prints each shipped record — redacted
+  arguments and host names included — to the collector's stdout, so keep
+  that output (journals, container logs) to the same audience. Treat the
+  collector endpoint, its storage, and its headers/tokens with the same
+  care as the hosts themselves.
+- **Correlation: the `trace` field joins caller spans — when populated.** The
+  record schema carries `trace`: the client's strict lowercase 55-byte W3C
+  `traceparent` echoed verbatim (and, on the native OTLP export, the decoded
+  trace/span ids alongside the JSONL body), so an event joins the caller's
+  distributed trace. Anything that reaches the seam with a valid traceparent
+  lands in the record; absent or malformed means the field is simply missing,
+  and a line without `trace` still ships — so never filter on its presence.
+  One caveat: with the pinned rmcp 3.5.1, `params._meta` is consumed into
+  request extensions at deserialization, so the `CallToolRequestParams.meta`
+  the seam reads is always empty and a wire-supplied `traceparent` currently
+  never reaches the record — the live carrier is `RequestContext.meta`, which
+  the seam does not consult. Until that handoff is fixed, expect no `trace`
+  on wire-driven records even when the client sends one. At audit schema
+  (`v: 1`) the record carries no caller identity and no `tracestate`
+  alongside `trace`; either would arrive as a new field, so a future
+  schema can add one without changing what `trace` means.
 
 ## Cancelling a foreground call
 
