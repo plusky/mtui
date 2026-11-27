@@ -35,6 +35,7 @@ use crate::http::{
 pub mod auth;
 pub mod document;
 pub mod tokens;
+pub mod verdict;
 
 use document::cap_detail;
 
@@ -45,6 +46,7 @@ pub use document::{
     is_valid_artifact_name,
 };
 pub use tokens::{CachedToken, TokenStore, describe_age};
+pub use verdict::{Decision, VerdictRefusal, verdict_gate};
 
 /// What TeReGen answered to `POST /reports/{id}/regenerate`.
 ///
